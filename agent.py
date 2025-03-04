@@ -35,7 +35,7 @@ class PrioritizedReplayMemory:
         samples = [self.memory[i] for i in indices]
         self.beta = np.min([1., self.beta + self.beta_increment])
         total = len(self.memory)
-        weights = (total * probs[indices])**(-self.beta)
+        weights = (total * probs[indices]) ** (-self.beta)
         weights /= weights.max()
         return samples, indices, weights
 
@@ -46,30 +46,39 @@ class PrioritizedReplayMemory:
 class QNetwork(nn.Module):
     def __init__(self, state_size, action_size):
         super(QNetwork, self).__init__()
-        self.fc1 = nn.Linear(state_size, 1024)
-        self.fc2 = nn.Linear(1024, 256)
-        self.fc3 = nn.Linear(256, action_size)
+        self.fc1 = nn.Linear(state_size, 64)
+        self.fc2 = nn.Linear(64, 32)
+        self.fc3 = nn.Linear(32, action_size)
+        self.dropout = nn.Dropout(0.1)
 
     def forward(self, x):
         x = torch.relu(self.fc1(x))
+        x = self.dropout(x)
         x = torch.relu(self.fc2(x))
+        x = self.dropout(x)
         return self.fc3(x)
 
 class DQNAgent:
-    def __init__(
-        self, state_size, action_size, gamma=0.99, lr=1e-3,
-        batch_size=128, max_memory=2000, epsilon=1.0,
-        epsilon_min=0.01, epsilon_decay=0.995
-    ):
+    def __init__(self, state_size, action_size, gamma=0.99, lr=1e-3,
+                 batch_size=128, max_memory=2000, epsilon=1.0,
+                 epsilon_min=0.01, epsilon_decay=0.995,
+                 tau=1.0, tau_min=0.1, tau_decay=0.995,
+                 policy='epsilon_g'):
         self.state_size = state_size
         self.action_size = action_size
         self.gamma = gamma
         self.batch_size = batch_size
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.policy = policy
+
         self.epsilon = epsilon
         self.epsilon_min = epsilon_min
         self.epsilon_decay = epsilon_decay
-        
+
+        self.tau = tau
+        self.tau_min = tau_min
+        self.tau_decay = tau_decay
+
         self.model = QNetwork(state_size, action_size).to(self.device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
         self.loss_fn = nn.MSELoss()
@@ -80,12 +89,20 @@ class DQNAgent:
         self.memory = PrioritizedReplayMemory(max_memory)
 
     def act(self, state):
-        if self.model.training and random.random() < self.epsilon:
-            return random.randint(0, self.action_size - 1)
         state_t = torch.FloatTensor(state).to(self.device)
         with torch.no_grad():
             q_values = self.model(state_t)
-        return torch.argmax(q_values).item()
+        if self.policy == 'boltzmann':
+            probabilities = torch.softmax(q_values / self.tau, dim=0).cpu().numpy()
+            action = np.random.choice(self.action_size, p=probabilities)
+        elif self.policy == 'epsilon_g':
+            if self.model.training and random.random() < self.epsilon:
+                action = random.randint(0, self.action_size - 1)
+            else:
+                action = torch.argmax(q_values).item()
+        else:
+            action = torch.argmax(q_values).item()
+        return int(action)
 
     def store_experience(self, state, action, reward, next_state, done):
         self.memory.store((state, action, reward, next_state, done))
@@ -122,6 +139,9 @@ class DQNAgent:
     def update_epsilon(self):
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
 
+    def update_tau(self):
+        self.tau = max(self.tau_min, self.tau * self.tau_decay)
+
     def update_target_network(self):
         self.target_model.load_state_dict(self.model.state_dict())
 
@@ -129,7 +149,9 @@ if __name__ == "__main__":
     from env import EnvBreakout
 
     env = EnvBreakout(render_mode=None)
-    agent = DQNAgent(state_size=env.observation_space[0], action_size=env.action_space.n)
+    agent = DQNAgent(state_size=env.observation_space[0],
+                     action_size=env.action_space.n,
+                     policy='boltzmann')  # Choisir 'epsilon_g' ou 'boltzmann'
     agent.model.train()
     target_update_interval = 10
 
@@ -142,7 +164,10 @@ if __name__ == "__main__":
             agent.store_experience(state, action, reward, next_state, done)
             agent.train_step()
             state = next_state
-        agent.update_epsilon()
+        if agent.policy == 'epsilon_g':
+            agent.update_epsilon()
+        elif agent.policy == 'boltzmann':
+            agent.update_tau()
         if episode % target_update_interval == 0:
             agent.update_target_network()
             print(f"Episode {episode}: mise à jour du réseau cible.")

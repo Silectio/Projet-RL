@@ -1,0 +1,5 @@
+digraph {
+	A [label=if_then_else]
+	B [label="lt(sin(ARG9), ARG3)"]
+	A -> B
+}
